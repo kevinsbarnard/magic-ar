@@ -21,7 +21,7 @@ def detect_rectangles(img, min_contour_area: int = 1000):
     edges = cv2.Canny(img, 100, 200)
     img_clean = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (8, 8)))
 
-    cv2.imshow('Cleaned image', img_clean)
+    # cv2.imshow('Cleaned image', img_clean)
     contours, hierarchy = cv2.findContours(img_clean, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 
     rect_contours = []
@@ -67,7 +67,7 @@ def detect_rectangles(img, min_contour_area: int = 1000):
         sorted_corners = [unpack_pt(unsorted_corners[pt]) for pt in (upper_left, upper_right, bottom_left, bottom_right)]
         sorted_sets.append(sorted_corners)
 
-    cv2.imshow('ordering test', img_copy)
+    # cv2.imshow('ordering test', img_copy)
 
     return rect_contours, sorted_sets
 

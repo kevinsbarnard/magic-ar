@@ -7,6 +7,8 @@ import numpy as np
 import json
 import difflib
 from cv.detection import detect_rectangles, solve_poses
+import textwrap
+import unidecode
 
 LOOP_DELAY = 30  # minimum delay in milliseconds
 MAIN_WINDOW = 'Main Window'
@@ -49,14 +51,40 @@ def teardown():
     cv2.destroyAllWindows()
 
 
-def dist(p1, p2):
+def dist(p1: iter, p2: iter):
+    """
+    Compute Euclidean distance between two points.
+    :param p1: First point iterable
+    :param p2: Second point iterable
+    :return: Float distance
+    """
     return np.linalg.norm(np.array(p1) - np.array(p2))
+
+
+def get_closest_pt(t_map, pt):
+    min_dist_pt = None
+    min_dist = 999999
+    for pt_close, pt_title in t_map.items():
+        dist_close = dist(pt, pt_close)
+        if dist_close < min_dist:
+            min_dist = dist_close
+            min_dist_pt = pt_close
+    return min_dist_pt
+
+
+def get_translation_info(name, language):
+    for trans_item in all_cards[name]['foreignData']:
+        if trans_item['language'] == language:
+            if 'name' in trans_item.keys() and 'text' in trans_item.keys():
+                return trans_item['name'], trans_item['text']
 
 
 def main():
     setup()
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(2)
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, False)
+    cap.set(cv2.CAP_PROP_FOCUS, 10)
 
     rect_model = [
         [0, 0, 0],
@@ -86,13 +114,21 @@ def main():
     titlebox_ul = tuple([int(v) for v in np.array([0.125, 0.125]) * 200])
     titlebox_br = tuple([int(v) for v in np.array([2.375, 0.375]) * 200])
 
+    title_map = dict()
+
+    fourcc_str = 'XVID'
+    fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+    vid_out = cv2.VideoWriter('vid_out.avi', fourcc, 10, (640, 480))
+
+    frame_num = 0
+
     while cv2.waitKey(LOOP_DELAY) != 27:
         ret, frame = cap.read()
         if not ret:
             break
         frame_h, frame_w, num_channels = frame.shape
         frame = frame[row_crop:frame_h-row_crop, col_crop:frame_w-col_crop]
-        frame = cv2.flip(frame, -1)
+        # frame = cv2.flip(frame, 2)
 
         rect_contours, sorted_sets = detect_rectangles(frame)
         # cv2.drawContours(frame, rect_contours, -1, (0, 255, 0), -1)
@@ -118,32 +154,69 @@ def main():
             # cv2.rectangle(warped, titlebox_ul, titlebox_br, (0, 255, 0), 2)
             orthophotos.append(warped)
 
-        # hconc = cv2.hconcat(orthophotos)
-        # if hconc is not None:
-        #     cv2.imshow('orthophotos', hconc)
-
-        for idx, ophoto in enumerate(orthophotos):
+        for idx, (ophoto, trans) in enumerate(zip(orthophotos, perspective_transforms)):
             roi = ophoto[titlebox_ul[1]:titlebox_br[1], titlebox_ul[0]:titlebox_br[0]]
-            title = pytesseract.image_to_string(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY))
+            title = pytesseract.image_to_string(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), config=('-l eng --oem 1 --psm 3'))
+            matched_title = ''
+            canvas = np.zeros((int(3.5*200*3), int(2.5*200*3), 3), dtype=np.uint8)
             if title:
-                close_matches = difflib.get_close_matches(title.strip(), card_titles, n=1)
+                title = (''.join(filter(lambda c: c.isalpha() or c==' ', title))).strip()
+                close_matches = difflib.get_close_matches(title, card_titles, n=1)
                 if close_matches:
                     matched_title = close_matches[0]
-                    cv2.putText(frame, matched_title, sorted_sets[idx][0], cv2.FONT_HERSHEY_PLAIN, 1, (0, 255, 0))
-                # print('Detected {}, close to {}'.format(title.strip(), close_matches))
+                    closest_pt = get_closest_pt(title_map, sorted_sets[idx][0])
+                    if closest_pt and dist(closest_pt, sorted_sets[idx][0]) < 100:
+                        title_map.pop(closest_pt)
+                    title_map[sorted_sets[idx][0]] = matched_title
+                else:
+                    closest_pt = get_closest_pt(title_map, sorted_sets[idx][0])
+                    if closest_pt and dist(closest_pt, sorted_sets[idx][0]) < 1000:
+                        matched_title = title_map[closest_pt]
+            else:
+                closest_pt = get_closest_pt(title_map, sorted_sets[idx][0])
+                if closest_pt and dist(closest_pt, sorted_sets[idx][0]) < 1000:
+                    matched_title = title_map[closest_pt]
 
-        # for r_vec, t_vec in poses:
-        #     axes_points, _ = cv2.projectPoints(axes, r_vec, t_vec, camera_matrix, np.zeros(4))
-        #     cv2.line(frame, tuple(axes_points[0, 0, :]), tuple(axes_points[1, 0, :]), (0, 0, 255), 2)
-        #     cv2.line(frame, tuple(axes_points[0, 0, :]), tuple(axes_points[2, 0, :]), (0, 255, 0), 2)
-        #
-        #     rm_pts_np = np.array(rect_model, dtype=np.float32)
-        #     rm_points = _ = cv2.projectPoints(rm_pts_np, r_vec, t_vec, camera_matrix, np.zeros(4))
-        #     cv2.line(frame, tuple(rm_points[0][0][0]), tuple(rm_points[0][3][0]), (255, 0, 0), 1)
-        #     cv2.line(frame, tuple(rm_points[0][1][0]), tuple(rm_points[0][2][0]), (255, 0, 0), 1)
+            if matched_title:
+                trans_data = get_translation_info(matched_title, 'Spanish')
+                if not trans_data:
+                    continue
+                trans_name = trans_data[0]
+                trans_name = unidecode.unidecode(trans_name)
+                trans_text = trans_data[1]
+                trans_text = unidecode.unidecode(trans_text)
+                wrap_text = textwrap.wrap(trans_text, 20)
+
+                cv2.putText(
+                    canvas, trans_name,
+                    (25, 50),
+                    cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), thickness=3
+                )
+                for line_idx, line in enumerate(wrap_text):
+                    cv2.putText(
+                        canvas, line,
+                        (25, 50*(line_idx+3)),
+                        cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), thickness=3
+                    )
+
+                warped_canvas = cv2.warpPerspective(canvas, trans, (frame_w, frame_h), flags=cv2.WARP_INVERSE_MAP)
+
+                _, canvas_mask = cv2.threshold(
+                    cv2.cvtColor(warped_canvas, cv2.COLOR_BGR2GRAY),
+                    0, 255,
+                    cv2.THRESH_BINARY_INV
+                )
+                canvas_mask = cv2.cvtColor(canvas_mask.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+                frame = cv2.bitwise_and(frame, canvas_mask)
+                frame = cv2.bitwise_or(frame, warped_canvas)
 
         cv2.imshow(MAIN_WINDOW, frame)
+        vid_out.write(frame)
+        frame_num += 1
+        cv2.imwrite('frames/frame_{}.png'.format(frame_num), frame)
 
+    vid_out.release()
     teardown()
 
 
