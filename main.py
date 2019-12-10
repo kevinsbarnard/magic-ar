@@ -6,7 +6,7 @@ import pytesseract
 import numpy as np
 import json
 import difflib
-from cv.detection import detect_rectangles, solve_poses
+from cv.detection import detect_rectangles
 import textwrap
 import unidecode
 
@@ -15,6 +15,7 @@ MAIN_WINDOW = 'Main Window'
 
 row_crop = 0
 col_crop = 0
+focus = 0
 
 all_cards = None
 
@@ -29,6 +30,11 @@ def col_crop_update(val):
     col_crop = val
 
 
+def focus_update(val):
+    global focus
+    focus = val
+
+
 def setup():
     """
     Set up the application
@@ -37,6 +43,7 @@ def setup():
     cv2.namedWindow(MAIN_WINDOW)
     cv2.createTrackbar('Row Crop', MAIN_WINDOW, row_crop, 480 // 2, row_crop_update)
     cv2.createTrackbar('Column Crop', MAIN_WINDOW, col_crop, 640 // 2, col_crop_update)
+    cv2.createTrackbar('Focus', MAIN_WINDOW, focus, 255, focus_update)
 
     with open('AllCards.json', 'r') as f:
         global all_cards
@@ -82,9 +89,8 @@ def get_translation_info(name, language):
 def main():
     setup()
 
-    cap = cv2.VideoCapture(2)
+    cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_AUTOFOCUS, False)
-    cap.set(cv2.CAP_PROP_FOCUS, 10)
 
     rect_model = [
         [0, 0, 0],
@@ -92,22 +98,6 @@ def main():
         [0, 3.5, 0],
         [2.5, 3.5, 0]
     ]
-
-    camera_matrix = np.array(
-        [
-            [453, 0, 320],
-            [0, 605, 240],
-            [0, 0, 1]
-        ], dtype=np.float32
-    )
-
-    axes = np.array(
-        [
-            [0, 0, 0],
-            [1, 0, 0],
-            [0, 1, 0],
-        ], dtype=np.float32
-    )
 
     card_titles = list(all_cards.keys())
 
@@ -123,44 +113,52 @@ def main():
     frame_num = 0
 
     while cv2.waitKey(LOOP_DELAY) != 27:
+        # Read in from the video source
+        cap.set(cv2.CAP_PROP_FOCUS, focus)
         ret, frame = cap.read()
         if not ret:
             break
         frame_h, frame_w, num_channels = frame.shape
-        frame = frame[row_crop:frame_h-row_crop, col_crop:frame_w-col_crop]
-        # frame = cv2.flip(frame, 2)
+        frame = frame[row_crop:frame_h - row_crop, col_crop:frame_w - col_crop]
+        frame = cv2.flip(frame, -1)
 
+        # Detect rectangles
         rect_contours, sorted_sets = detect_rectangles(frame)
-        # cv2.drawContours(frame, rect_contours, -1, (0, 255, 0), -1)
-        # cv2.drawContours(frame, rect_contours, -1, (0, 0, 255), 3)
 
-        # for rect_set in sorted_sets:
-        #     for corner in rect_set:
-        #         cv2.circle(frame, tuple(corner), 3, (0, 0, 255), -1)
+        # Filter out any rectangles whose ratio of width/height is out of bounds
+        sorted_sets = list(filter(
+            lambda r_set: False if dist(r_set[0], r_set[2]) == 0 else 0.5 < dist(r_set[0], r_set[1]) / dist(r_set[0], r_set[2]) < 0.9,
+            sorted_sets
+        ))
 
-        sorted_sets = list(filter(lambda r_set: False if dist(r_set[0], r_set[2]) == 0 else 0.6 < dist(r_set[0], r_set[1]) / dist(r_set[0], r_set[2]) < 0.8, sorted_sets))
-        poses = solve_poses(sorted_sets, rect_model, camera_matrix)
-
+        # Solve perspective transforms (image -> model)
         perspective_transforms = []
         for rect_set in sorted_sets:
             rect_np = np.array(rect_set, dtype=np.float32)
             model_np = np.array(rect_model, dtype=np.float32)[:, :2]
-            trans = cv2.getPerspectiveTransform(rect_np, model_np*200)
+            trans = cv2.getPerspectiveTransform(rect_np, model_np * 200)
             perspective_transforms.append(trans)
 
+        # Generate orthophotos
         orthophotos = []
         for trans in perspective_transforms:
             warped = cv2.warpPerspective(frame, trans, (500, 700))
-            # cv2.rectangle(warped, titlebox_ul, titlebox_br, (0, 255, 0), 2)
+            cv2.rectangle(warped, titlebox_ul, titlebox_br, (0, 255, 0), 2)
             orthophotos.append(warped)
 
+        # Identify, translate, and reproject onto each card
         for idx, (ophoto, trans) in enumerate(zip(orthophotos, perspective_transforms)):
+            # Get title box from orthophoto
             roi = ophoto[titlebox_ul[1]:titlebox_br[1], titlebox_ul[0]:titlebox_br[0]]
+
+            # Run ROI through tesseract
             title = pytesseract.image_to_string(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY), config=('-l eng --oem 1 --psm 3'))
             matched_title = ''
-            canvas = np.zeros((int(3.5*200*3), int(2.5*200*3), 3), dtype=np.uint8)
+
+            # Make a blank canvas
+            canvas = np.zeros((int(3.5 * 200 * 3), int(2.5 * 200 * 3), 3), dtype=np.uint8)
             if title:
-                title = (''.join(filter(lambda c: c.isalpha() or c==' ', title))).strip()
+                title = (''.join(filter(lambda c: c.isalpha() or c == ' ', title))).strip()
                 close_matches = difflib.get_close_matches(title, card_titles, n=1)
                 if close_matches:
                     matched_title = close_matches[0]
@@ -177,6 +175,7 @@ def main():
                 if closest_pt and dist(closest_pt, sorted_sets[idx][0]) < 1000:
                     matched_title = title_map[closest_pt]
 
+            # Lookup card info and paint the canvas
             if matched_title:
                 trans_data = get_translation_info(matched_title, 'Spanish')
                 if not trans_data:
@@ -187,15 +186,18 @@ def main():
                 trans_text = unidecode.unidecode(trans_text)
                 wrap_text = textwrap.wrap(trans_text, 20)
 
+                # Put the card title
                 cv2.putText(
                     canvas, trans_name,
                     (25, 50),
                     cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), thickness=3
                 )
+
+                # Put the card description
                 for line_idx, line in enumerate(wrap_text):
                     cv2.putText(
                         canvas, line,
-                        (25, 50*(line_idx+3)),
+                        (25, 50 * (line_idx + 3)),
                         cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), thickness=3
                     )
 

@@ -17,11 +17,9 @@ def detect_rectangles(img, min_contour_area: int = 1000):
     :return: Detected rectangle contours
     """
     img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # img_bw = cv2.adaptiveThreshold(img_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 115, 1)
     edges = cv2.Canny(img, 100, 200)
     img_clean = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (8, 8)))
 
-    # cv2.imshow('Cleaned image', img_clean)
     contours, hierarchy = cv2.findContours(img_clean, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 
     rect_contours = []
@@ -70,15 +68,3 @@ def detect_rectangles(img, min_contour_area: int = 1000):
     # cv2.imshow('ordering test', img_copy)
 
     return rect_contours, sorted_sets
-
-
-def solve_poses(rects_corners, rect_model, K):
-    rect_model_array = np.array(rect_model, dtype=np.float32)
-    # print(rect_model_array)
-    poses = []
-    for rect_corners in rects_corners:
-        rect_im_array = np.array(rect_corners, dtype=np.float32)
-        # print(rect_im_array)
-        _, r_vec, t_vec = cv2.solvePnP(rect_model_array, rect_im_array, K, np.zeros(4))
-        poses.append((r_vec, t_vec))
-    return poses
